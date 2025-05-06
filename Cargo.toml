@@ -1,6 +1,6 @@
 [package]
 name = "esp-idf-hal"
-version = "0.44.1"
+version = "0.45.2"
 authors = ["sapir <yasapir@gmail.com>", "Ivan Markov <ivan.markov@gmail.com>"]
 edition = "2021"
 resolver = "2"
@@ -62,7 +62,7 @@ atomic-waker = { version = "1.1.1", default-features = false }
 embassy-sync = { version = "0.6" }
 
 [build-dependencies]
-embuild = { version = "0.32.0" }
+embuild = { version = "0.33.0" }
 
 [dev-dependencies]
 anyhow = "1"

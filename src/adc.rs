@@ -7,10 +7,11 @@ use esp_idf_sys::*;
     not(esp32c2),
     esp_idf_comp_esp_adc_enabled
 ))]
+#[allow(deprecated)]
 pub use continuous::{
     config as cont_config, config::Config as AdcContConfig, AdcChannels, AdcChannelsArray,
-    AdcDriver as AdcContDriver, AdcMeasurement, Atten11dB, Atten2p5dB, Atten6dB, AttenNone,
-    Attenuated, ChainedAdcChannels, EmptyAdcChannels,
+    AdcDriver as AdcContDriver, AdcMeasurement, Atten11dB, Atten12dB, Atten2p5dB, Atten6dB,
+    AttenNone, Attenuated, ChainedAdcChannels, EmptyAdcChannels,
 };
 
 #[cfg(any(feature = "adc-oneshot-legacy", esp_idf_version_major = "4"))]
@@ -24,13 +25,16 @@ pub trait Adc: Send {
 pub mod attenuation {
     pub use esp_idf_sys::{
         adc_atten_t, adc_atten_t_ADC_ATTEN_DB_0, adc_atten_t_ADC_ATTEN_DB_11,
-        adc_atten_t_ADC_ATTEN_DB_2_5, adc_atten_t_ADC_ATTEN_DB_6,
+        adc_atten_t_ADC_ATTEN_DB_11 as adc_atten_t_ADC_ATTEN_DB_12, adc_atten_t_ADC_ATTEN_DB_2_5,
+        adc_atten_t_ADC_ATTEN_DB_6,
     };
 
     pub const NONE: adc_atten_t = adc_atten_t_ADC_ATTEN_DB_0;
     pub const DB_2_5: adc_atten_t = adc_atten_t_ADC_ATTEN_DB_2_5;
     pub const DB_6: adc_atten_t = adc_atten_t_ADC_ATTEN_DB_6;
+    #[deprecated(since = "0.45.3", note = "Use `DB_12` instead")]
     pub const DB_11: adc_atten_t = adc_atten_t_ADC_ATTEN_DB_11;
+    pub const DB_12: adc_atten_t = adc_atten_t_ADC_ATTEN_DB_12;
 }
 
 /// The sampling/readout resolution of the ADC
@@ -48,15 +52,21 @@ pub enum Resolution {
     Resolution13Bit,
 }
 
-impl Default for Resolution {
-    #[cfg(any(esp32, esp32c3, esp32s3, esp32c2, esp32h2, esp32c5, esp32c6, esp32p4))]
-    fn default() -> Self {
+impl Resolution {
+    #[cfg(not(esp32s2))]
+    pub const fn new() -> Self {
         Self::Resolution12Bit
     }
 
     #[cfg(esp32s2)]
-    fn default() -> Self {
+    pub const fn new() -> Self {
         Self::Resolution13Bit
+    }
+}
+
+impl Default for Resolution {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -85,7 +95,7 @@ mod oneshot_legacy {
 
     use crate::peripheral::{Peripheral, PeripheralRef};
 
-    use super::{to_nb_err, Adc};
+    use super::{to_nb_err, Adc, DirectConverter};
 
     pub type AdcConfig = config::Config;
 
@@ -150,8 +160,8 @@ mod oneshot_legacy {
         }
     }
 
-    impl<'d, const A: adc_atten_t, T: ADCPin> embedded_hal_0_2::adc::Channel<T::Adc>
-        for AdcChannelDriver<'d, A, T>
+    impl<const A: adc_atten_t, T: ADCPin> embedded_hal_0_2::adc::Channel<T::Adc>
+        for AdcChannelDriver<'_, A, T>
     {
         type ID = (adc_channel_t, adc_atten_t);
 
@@ -173,7 +183,7 @@ mod oneshot_legacy {
         >,
     }
 
-    unsafe impl<'d, ADC: Adc> Send for AdcDriver<'d, ADC> {}
+    unsafe impl<ADC: Adc> Send for AdcDriver<'_, ADC> {}
 
     impl<'d, ADC: Adc> AdcDriver<'d, ADC> {
         #[cfg(all(
@@ -196,12 +206,6 @@ mod oneshot_legacy {
         ))]
         const CALIBRATION_SCHEME: esp_adc_cal_value_t =
             esp_adc_cal_value_t_ESP_ADC_CAL_VAL_EFUSE_TP_FIT;
-
-        #[cfg(not(esp32s2))]
-        const MAX_READING: u32 = 4095;
-
-        #[cfg(esp32s2)]
-        const MAX_READING: u32 = 8191;
 
         pub fn new(
             adc: impl Peripheral<P = ADC> + 'd,
@@ -323,50 +327,16 @@ mod oneshot_legacy {
             let mv = if let Some(cal) = self.get_cal_characteristics(attenuation)? {
                 unsafe { esp_adc_cal_raw_to_voltage(measurement as u32, &cal) as u16 }
             } else {
-                (measurement as u32 * Self::get_max_mv(attenuation) / Self::MAX_READING) as u16
+                DirectConverter(attenuation).raw_to_mv(measurement)
             };
 
             #[cfg(not(all(
                 any(esp32, esp32s2, esp32s3, esp32c3),
                 any(esp_idf_comp_esp_adc_cal_enabled, esp_idf_comp_esp_adc_enabled)
             )))]
-            let mv =
-                (measurement as u32 * Self::get_max_mv(attenuation) / Self::MAX_READING) as u16;
+            let mv = DirectConverter(attenuation).raw_to_mv(measurement);
 
             Ok(mv)
-        }
-
-        #[inline(always)]
-        #[allow(non_upper_case_globals)]
-        fn get_max_mv(attenuation: adc_atten_t) -> u32 {
-            #[cfg(esp32)]
-            let mv = match attenuation {
-                adc_atten_t_ADC_ATTEN_DB_0 => 950,
-                adc_atten_t_ADC_ATTEN_DB_2_5 => 1250,
-                adc_atten_t_ADC_ATTEN_DB_6 => 1750,
-                adc_atten_t_ADC_ATTEN_DB_11 => 2450,
-                other => panic!("Unknown attenuation: {}", other),
-            };
-
-            #[cfg(any(esp32c3, esp32s2, esp32c2, esp32h2, esp32c5, esp32c6, esp32p4))]
-            let mv = match attenuation {
-                adc_atten_t_ADC_ATTEN_DB_0 => 750,
-                adc_atten_t_ADC_ATTEN_DB_2_5 => 1050,
-                adc_atten_t_ADC_ATTEN_DB_6 => 1300,
-                adc_atten_t_ADC_ATTEN_DB_11 => 2500,
-                other => panic!("Unknown attenuation: {}", other),
-            };
-
-            #[cfg(esp32s3)]
-            let mv = match attenuation {
-                adc_atten_t_ADC_ATTEN_DB_0 => 950,
-                adc_atten_t_ADC_ATTEN_DB_2_5 => 1250,
-                adc_atten_t_ADC_ATTEN_DB_6 => 1750,
-                adc_atten_t_ADC_ATTEN_DB_11 => 3100,
-                other => panic!("Unknown attenuation: {}", other),
-            };
-
-            mv
         }
 
         #[cfg(all(
@@ -404,9 +374,9 @@ mod oneshot_legacy {
         }
     }
 
-    impl<'d, 'c, const A: adc_atten_t, T>
+    impl<'c, const A: adc_atten_t, T>
         embedded_hal_0_2::adc::OneShot<T::Adc, u16, AdcChannelDriver<'c, A, T>>
-        for AdcDriver<'d, T::Adc>
+        for AdcDriver<'_, T::Adc>
     where
         T: ADCPin,
     {
@@ -419,8 +389,8 @@ mod oneshot_legacy {
     }
 
     #[cfg(all(esp32, esp_idf_version_major = "4"))]
-    impl<'d> embedded_hal_0_2::adc::OneShot<super::ADC1, u16, crate::hall::HallSensor>
-        for AdcDriver<'d, super::ADC1>
+    impl embedded_hal_0_2::adc::OneShot<super::ADC1, u16, crate::hall::HallSensor>
+        for AdcDriver<'_, super::ADC1>
     {
         type Error = EspError;
 
@@ -458,6 +428,56 @@ impl_adc!(ADC1: adc_unit_t_ADC_UNIT_1);
 #[cfg(not(any(esp32c2, esp32h2, esp32c5, esp32c6, esp32p4)))] // TODO: Check for esp32c5 and esp32p4
 impl_adc!(ADC2: adc_unit_t_ADC_UNIT_2);
 
+/// Converts a raw reading to mV without using calibration
+struct DirectConverter(adc_atten_t);
+
+impl DirectConverter {
+    #[cfg(not(esp32s2))]
+    const MAX_READING: u32 = 4095;
+
+    #[cfg(esp32s2)]
+    const MAX_READING: u32 = 8191;
+
+    fn raw_to_mv(&self, raw: u16) -> u16 {
+        (raw as u32 * self.get_max_mv() as u32 / Self::MAX_READING) as u16
+    }
+
+    #[inline(always)]
+    #[allow(non_upper_case_globals)]
+    fn get_max_mv(&self) -> u16 {
+        let attenuation = self.0;
+
+        #[cfg(esp32)]
+        let mv = match attenuation {
+            adc_atten_t_ADC_ATTEN_DB_0 => 950,
+            adc_atten_t_ADC_ATTEN_DB_2_5 => 1250,
+            adc_atten_t_ADC_ATTEN_DB_6 => 1750,
+            adc_atten_t_ADC_ATTEN_DB_11 => 2450,
+            other => panic!("Unknown attenuation: {other}"),
+        };
+
+        #[cfg(any(esp32c3, esp32s2, esp32c2, esp32h2, esp32c5, esp32c6, esp32p4))]
+        let mv = match attenuation {
+            adc_atten_t_ADC_ATTEN_DB_0 => 750,
+            adc_atten_t_ADC_ATTEN_DB_2_5 => 1050,
+            adc_atten_t_ADC_ATTEN_DB_6 => 1300,
+            adc_atten_t_ADC_ATTEN_DB_11 => 2500,
+            other => panic!("Unknown attenuation: {other}"),
+        };
+
+        #[cfg(esp32s3)]
+        let mv = match attenuation {
+            adc_atten_t_ADC_ATTEN_DB_0 => 950,
+            adc_atten_t_ADC_ATTEN_DB_2_5 => 1250,
+            adc_atten_t_ADC_ATTEN_DB_6 => 1750,
+            adc_atten_t_ADC_ATTEN_DB_11 => 3100,
+            other => panic!("Unknown attenuation: {other}"),
+        };
+
+        mv
+    }
+}
+
 /// One-shot ADC module
 /// Example: reading a value form a pin and printing it on the terminal
 /// ```
@@ -465,7 +485,7 @@ impl_adc!(ADC2: adc_unit_t_ADC_UNIT_2);
 /// use std::time::Duration;
 ///
 /// fn main() -> anyhow::Result<()> {
-///     use esp_idf_hal::adc::attenuation::DB_11;
+///     use esp_idf_hal::adc::attenuation::DB_12;
 ///     use esp_idf_hal::adc::oneshot::config::AdcChannelConfig;
 ///     use esp_idf_hal::adc::oneshot::*;
 ///     use esp_idf_hal::peripherals::Peripherals;
@@ -476,8 +496,7 @@ impl_adc!(ADC2: adc_unit_t_ADC_UNIT_2);
 ///     /// configuring pin to analog read, you can regulate the adc input voltage range depending on your need
 ///     /// for this example we use the attenuation of 11db which sets the input voltage range to around 0-3.6V
 ///     let config = AdcChannelConfig {
-///         attenuation: DB_11,
-///         calibration: true,
+///         attenuation: DB_12,
 ///         ..Default::default()
 ///     };
 ///     let mut adc_pin = AdcChannelDriver::new(&adc, peripherals.pins.gpio2, &config)?;
@@ -506,23 +525,219 @@ pub mod oneshot {
     use super::attenuation::adc_atten_t;
     use super::to_nb_err;
     use super::Adc;
+    use super::DirectConverter;
 
     pub mod config {
         use super::adc_atten_t;
 
         pub use crate::adc::Resolution;
 
+        #[derive(Debug, Copy, Clone, Default, Eq, PartialEq, Hash)]
+        pub enum Calibration {
+            #[default]
+            None,
+            #[cfg(all(
+                any(esp_idf_comp_esp_adc_cal_enabled, esp_idf_comp_esp_adc_enabled),
+                any(
+                    esp32c3,
+                    all(
+                        esp32c6,
+                        not(all(esp_idf_version_major = "5", esp_idf_version_minor = "0")),
+                        not(esp_idf_version_full = "5.1.0")
+                    ),
+                    esp32s3,
+                )
+            ))]
+            Curve,
+            #[cfg(all(
+                any(esp_idf_comp_esp_adc_cal_enabled, esp_idf_comp_esp_adc_enabled),
+                any(esp32, esp32c2, esp32s2)
+            ))]
+            Line,
+        }
+
         #[derive(Debug, Copy, Clone, Default)]
         pub struct AdcChannelConfig {
             pub attenuation: adc_atten_t,
             pub resolution: Resolution,
-            #[cfg(any(esp_idf_comp_esp_adc_cal_enabled, esp_idf_comp_esp_adc_enabled))]
-            pub calibration: bool,
+            pub calibration: Calibration,
         }
 
         impl AdcChannelConfig {
-            pub fn new() -> Self {
-                Default::default()
+            pub const fn new() -> Self {
+                Self {
+                    attenuation: crate::adc::attenuation::NONE,
+                    resolution: Resolution::new(),
+                    calibration: Calibration::None,
+                }
+            }
+        }
+    }
+
+    /// Converts a raw reading to mV with or without calibration
+    enum Converter {
+        NoCalibration(adc_atten_t),
+        #[cfg(all(
+            any(esp_idf_comp_esp_adc_cal_enabled, esp_idf_comp_esp_adc_enabled),
+            any(
+                esp32c3,
+                all(
+                    esp32c6,
+                    not(all(esp_idf_version_major = "5", esp_idf_version_minor = "0")),
+                    not(esp_idf_version_full = "5.1.0")
+                ),
+                esp32s3,
+            )
+        ))]
+        CurveFittingCalibration(adc_cali_handle_t),
+        #[cfg(all(
+            any(esp_idf_comp_esp_adc_cal_enabled, esp_idf_comp_esp_adc_enabled),
+            any(esp32, esp32c2, esp32s2)
+        ))]
+        LineFittingCalibration(adc_cali_handle_t),
+    }
+
+    impl Converter {
+        #[allow(unused_variables)]
+        fn create(
+            unit_id: u8,
+            chan: adc_channel_t,
+            atten: adc_atten_t,
+            bitwidth: adc_bits_width_t,
+            calibration: config::Calibration,
+        ) -> Result<Self, EspError> {
+            match calibration {
+                config::Calibration::None => Ok(Self::NoCalibration(atten)),
+                #[cfg(all(
+                    any(esp_idf_comp_esp_adc_cal_enabled, esp_idf_comp_esp_adc_enabled),
+                    any(
+                        esp32c3,
+                        all(
+                            esp32c6,
+                            not(all(esp_idf_version_major = "5", esp_idf_version_minor = "0")),
+                            not(esp_idf_version_full = "5.1.0")
+                        ),
+                        esp32s3,
+                    )
+                ))]
+                config::Calibration::Curve => {
+                    // it would be nice if esp-idf-sys could export some cfg values to replicate these two defines
+                    // from esp-idf:
+                    // ADC_CALI_SCHEME_CURVE_FITTING_SUPPORTED
+                    // ADC_CALI_SCHEME_LINE_FITTING_SUPPORTED
+                    // then we wouuld not need the ugliness for the esp32c6
+                    let cal_config = adc_cali_curve_fitting_config_t {
+                        unit_id: unit_id as u32,
+                        #[cfg(all(
+                            esp_idf_version_major = "5",
+                            not(esp_idf_version_minor = "0"),
+                            not(all(esp_idf_version_minor = "1", esp_idf_version_patch = "0"))
+                        ))]
+                        chan,
+                        atten,
+                        bitwidth,
+                    };
+                    let mut cal_handle: adc_cali_handle_t = core::ptr::null_mut();
+                    esp!(unsafe {
+                        esp_idf_sys::adc_cali_create_scheme_curve_fitting(
+                            &cal_config,
+                            &mut cal_handle,
+                        )
+                    })?;
+
+                    Ok(Self::CurveFittingCalibration(cal_handle))
+                }
+                #[cfg(all(
+                    any(esp_idf_comp_esp_adc_cal_enabled, esp_idf_comp_esp_adc_enabled),
+                    any(esp32, esp32c2, esp32s2)
+                ))]
+                config::Calibration::Line => {
+                    // esp32 has an additional field that the exanple defaults
+                    // to using fuse values for vref. Maybe we should expose
+                    // this as a config option?
+                    #[allow(clippy::needless_update)]
+                    let cal_config = adc_cali_line_fitting_config_t {
+                        unit_id: unit_id as u32,
+                        atten,
+                        bitwidth,
+                        ..Default::default()
+                    };
+                    let mut cal_handle: adc_cali_handle_t = core::ptr::null_mut();
+                    esp!(unsafe {
+                        esp_idf_sys::adc_cali_create_scheme_line_fitting(
+                            &cal_config,
+                            &mut cal_handle,
+                        )
+                    })?;
+
+                    Ok(Self::LineFittingCalibration(cal_handle))
+                }
+            }
+        }
+
+        fn raw_to_mv(&self, raw: u16) -> Result<u16, EspError> {
+            match self {
+                Self::NoCalibration(atten) => Ok(DirectConverter(*atten).raw_to_mv(raw)),
+                #[cfg(all(
+                    any(esp_idf_comp_esp_adc_cal_enabled, esp_idf_comp_esp_adc_enabled),
+                    any(
+                        esp32c3,
+                        all(
+                            esp32c6,
+                            not(all(esp_idf_version_major = "5", esp_idf_version_minor = "0")),
+                            not(esp_idf_version_full = "5.1.0")
+                        ),
+                        esp32s3,
+                    )
+                ))]
+                Self::CurveFittingCalibration(handle) => {
+                    let mut mv = 0i32;
+                    esp!(unsafe { adc_cali_raw_to_voltage(*handle, raw as i32, &mut mv) })?;
+
+                    Ok(mv as u16)
+                }
+                #[cfg(all(
+                    any(esp_idf_comp_esp_adc_cal_enabled, esp_idf_comp_esp_adc_enabled),
+                    any(esp32, esp32c2, esp32s2)
+                ))]
+                Self::LineFittingCalibration(handle) => {
+                    let mut mv = 0i32;
+                    esp!(unsafe { adc_cali_raw_to_voltage(*handle, raw as i32, &mut mv) })?;
+
+                    Ok(mv as u16)
+                }
+            }
+        }
+    }
+
+    impl Drop for Converter {
+        fn drop(&mut self) {
+            match self {
+                Self::NoCalibration(_) => (),
+                #[cfg(all(
+                    any(esp_idf_comp_esp_adc_cal_enabled, esp_idf_comp_esp_adc_enabled),
+                    any(
+                        esp32c3,
+                        all(
+                            esp32c6,
+                            not(all(esp_idf_version_major = "5", esp_idf_version_minor = "0")),
+                            not(esp_idf_version_full = "5.1.0")
+                        ),
+                        esp32s3,
+                    )
+                ))]
+                Self::CurveFittingCalibration(handle) => {
+                    esp!(unsafe { esp_idf_sys::adc_cali_delete_scheme_curve_fitting(*handle) })
+                        .unwrap()
+                }
+                #[cfg(all(
+                    any(esp_idf_comp_esp_adc_cal_enabled, esp_idf_comp_esp_adc_enabled),
+                    any(esp32, esp32c2, esp32s2)
+                ))]
+                Self::LineFittingCalibration(handle) => {
+                    esp!(unsafe { esp_idf_sys::adc_cali_delete_scheme_line_fitting(*handle) })
+                        .unwrap()
+                }
             }
         }
     }
@@ -534,7 +749,7 @@ pub mod oneshot {
     {
         adc: M,
         _pin: PeripheralRef<'d, T>,
-        calibration: Option<adc_cali_handle_t>,
+        converter: Converter,
     }
 
     impl<'d, T, M> AdcChannelDriver<'d, T, M>
@@ -558,6 +773,14 @@ pub mod oneshot {
                 bitwidth: config.resolution.into(),
             };
 
+            let converter = Converter::create(
+                T::Adc::unit() as u8,
+                pin.adc_channel(),
+                config.attenuation,
+                config.resolution.into(),
+                config.calibration,
+            )?;
+
             unsafe {
                 esp!(adc_oneshot_config_channel(
                     adc.borrow().handle,
@@ -566,123 +789,17 @@ pub mod oneshot {
                 ))?
             };
 
-            let mut calibration = Self::get_curve_calibration_handle(
-                T::Adc::unit() as u8,
-                pin.adc_channel(),
-                config.attenuation,
-                config.resolution.into(),
-            );
-            if calibration.is_none() {
-                calibration = Self::get_line_calibration_handle(
-                    T::Adc::unit() as u8,
-                    config.attenuation,
-                    config.resolution.into(),
-                );
-            }
             Ok(Self {
                 adc,
                 _pin: pin,
-                calibration,
+                converter,
             })
-        }
-
-        #[allow(unused_variables)]
-        fn get_curve_calibration_handle(
-            unit_id: u8,
-            chan: adc_channel_t,
-            atten: adc_atten_t,
-            bitwidth: adc_bits_width_t,
-        ) -> Option<adc_cali_handle_t> {
-            // it would be nice if esp-idf-sys could export some cfg values to replicate these two defines
-            // from esp-idf:
-            // ADC_CALI_SCHEME_CURVE_FITTING_SUPPORTED
-            // ADC_CALI_SCHEME_LINE_FITTING_SUPPORTED
-            // then we wouuld not need the uglyness for the esp32c6
-            #[cfg(any(
-                esp32c3,
-                all(
-                    esp32c6,
-                    not(all(esp_idf_version_major = "5", esp_idf_version_minor = "0")),
-                    not(esp_idf_version_full = "5.1.0")
-                ),
-                esp32s3,
-            ))]
-            {
-                let cal_config = adc_cali_curve_fitting_config_t {
-                    unit_id: unit_id as u32,
-                    #[cfg(all(
-                        esp_idf_version_major = "5",
-                        not(esp_idf_version_minor = "0"),
-                        not(all(esp_idf_version_minor = "1", esp_idf_version_patch = "0"))
-                    ))]
-                    chan,
-                    atten,
-                    bitwidth,
-                };
-                let mut cal_handle: adc_cali_handle_t = core::ptr::null_mut();
-                if let Err(_err) = unsafe {
-                    esp!(esp_idf_sys::adc_cali_create_scheme_curve_fitting(
-                        &cal_config,
-                        &mut cal_handle
-                    ))
-                } {
-                    // I'd log a warning but the log crate is not available here
-                    None
-                } else {
-                    Some(cal_handle)
-                }
-            }
-            #[cfg(not(any(
-                esp32c3,
-                all(
-                    esp32c6,
-                    not(all(esp_idf_version_major = "5", esp_idf_version_minor = "0")),
-                    not(esp_idf_version_full = "5.1.0")
-                ),
-                esp32s3,
-            )))]
-            None
-        }
-
-        #[allow(unused_variables)]
-        fn get_line_calibration_handle(
-            unit_id: u8,
-            atten: adc_atten_t,
-            bitwidth: adc_bits_width_t,
-        ) -> Option<adc_cali_handle_t> {
-            #[cfg(any(esp32, esp32c2, esp32s2))]
-            {
-                // esp32 has an additional field that the exanple defalts
-                // to using fuse values for vref. Maybe we should expose
-                // this as a config option?
-                #[allow(clippy::needless_update)]
-                let cal_config = adc_cali_line_fitting_config_t {
-                    unit_id: unit_id as u32,
-                    atten,
-                    bitwidth,
-                    ..Default::default()
-                };
-                let mut cal_handle: adc_cali_handle_t = core::ptr::null_mut();
-                if let Err(_err) = unsafe {
-                    esp!(esp_idf_sys::adc_cali_create_scheme_line_fitting(
-                        &cal_config,
-                        &mut cal_handle
-                    ))
-                } {
-                    // I'd log a warning but the log crate is not available here
-                    None
-                } else {
-                    Some(cal_handle)
-                }
-            }
-            #[cfg(not(any(esp32, esp32c2, esp32s2)))]
-            None
         }
 
         #[inline(always)]
         pub fn read(&mut self) -> Result<u16, EspError> {
             let raw = self.read_raw()?;
-            self.raw_to_cal(raw)
+            self.raw_to_mv(raw)
         }
 
         #[inline(always)]
@@ -692,12 +809,8 @@ pub mod oneshot {
         }
 
         #[inline(always)]
-        pub fn raw_to_cal(&self, raw: u16) -> Result<u16, EspError> {
-            if let Some(calibration) = &self.calibration {
-                self.adc.borrow().raw_to_cal_internal(*calibration, raw)
-            } else {
-                Ok(raw)
-            }
+        pub fn raw_to_mv(&self, raw: u16) -> Result<u16, EspError> {
+            self.converter.raw_to_mv(raw)
         }
     }
 
@@ -744,7 +857,7 @@ pub mod oneshot {
             M: Borrow<AdcDriver<'d, T::Adc>>,
         {
             let raw = self.read_raw(channel)?;
-            self.raw_to_cal(channel, raw)
+            self.raw_to_mv(channel, raw)
         }
 
         #[inline(always)]
@@ -767,7 +880,7 @@ pub mod oneshot {
         }
 
         #[inline(always)]
-        pub fn raw_to_cal<T, M>(
+        pub fn raw_to_mv<T, M>(
             &self,
             channel: &AdcChannelDriver<'d, T, M>,
             raw: u16,
@@ -776,28 +889,11 @@ pub mod oneshot {
             T: ADCPin,
             M: Borrow<AdcDriver<'d, T::Adc>>,
         {
-            if let Some(calibration) = &channel.calibration {
-                self.raw_to_cal_internal(*calibration, raw)
-            } else {
-                Ok(raw)
-            }
-        }
-
-        #[inline(always)]
-        fn raw_to_cal_internal(
-            &self,
-            calibration: adc_cali_handle_t,
-            raw: u16,
-        ) -> Result<u16, EspError> {
-            let mut mv = 0i32;
-            unsafe {
-                esp!(adc_cali_raw_to_voltage(calibration, raw as i32, &mut mv))?;
-            };
-            Ok(mv as u16)
+            channel.converter.raw_to_mv(raw)
         }
     }
 
-    impl<'d, ADC: Adc> Drop for AdcDriver<'d, ADC> {
+    impl<ADC: Adc> Drop for AdcDriver<'_, ADC> {
         fn drop(&mut self) {
             unsafe { esp!(adc_oneshot_del_unit(self.handle)) }.unwrap();
         }
@@ -816,14 +912,14 @@ pub mod oneshot {
         }
     }
 
-    unsafe impl<'d, ADC: Adc> Send for AdcDriver<'d, ADC> {}
-    unsafe impl<'d, ADC: Adc> Sync for AdcDriver<'d, ADC> {}
+    unsafe impl<ADC: Adc> Send for AdcDriver<'_, ADC> {}
+    unsafe impl<ADC: Adc> Sync for AdcDriver<'_, ADC> {}
 }
 
 /// Continuous ADC module
 /// Example: continuously reading value from a pin
 /// ```
-/// use log::{info, debug};
+/// use ::log::{info, debug};
 ///
 /// fn main() -> anyhow::Result<()> {
 ///     use esp_idf_svc::hal::adc::{AdcContConfig, AdcContDriver, AdcMeasurement, Attenuated};
@@ -837,7 +933,7 @@ pub mod oneshot {
 ///     let peripherals = Peripherals::take()?;
 ///     let config = AdcContConfig::default();
 ///
-///     let adc_1_channel_0 = Attenuated::db11(peripherals.pins.gpio0);
+///     let adc_1_channel_0 = Attenuated::db12(peripherals.pins.gpio0);
 ///     let mut adc = AdcContDriver::new(peripherals.adc1, &config, adc_1_channel_0)?;
 ///
 ///     adc.start()?;
@@ -876,7 +972,7 @@ pub mod continuous {
     use super::{attenuation, Adc};
 
     /// Set ADC attenuation level
-    /// Example: let pin = Attenuated::db11(peripherals.pins.gpio0);
+    /// Example: let pin = Attenuated::db12(peripherals.pins.gpio0);
     pub struct Attenuated<const A: adc_atten_t, T>(T);
 
     impl<T> Attenuated<{ attenuation::NONE }, T> {
@@ -897,8 +993,20 @@ pub mod continuous {
         }
     }
 
+    #[allow(deprecated)]
     impl<T> Attenuated<{ attenuation::DB_11 }, T> {
+        #[cfg_attr(
+            not(esp_idf_version_major = "4"),
+            deprecated(since = "0.45.3", note = "Use `Attenuated::db12` instead")
+        )]
         pub const fn db11(t: T) -> Self {
+            Self(t)
+        }
+    }
+
+    #[cfg(not(esp_idf_version_major = "4"))]
+    impl<T> Attenuated<{ attenuation::DB_12 }, T> {
+        pub const fn db12(t: T) -> Self {
             Self(t)
         }
     }
@@ -912,7 +1020,10 @@ pub mod continuous {
     pub type AttenNone<T> = Attenuated<{ attenuation::NONE }, T>;
     pub type Atten2p5dB<T> = Attenuated<{ attenuation::DB_2_5 }, T>;
     pub type Atten6dB<T> = Attenuated<{ attenuation::DB_6 }, T>;
+    #[deprecated(since = "0.45.3", note = "Use `Atten12dB` instead")]
+    #[allow(deprecated)]
     pub type Atten11dB<T> = Attenuated<{ attenuation::DB_11 }, T>;
+    pub type Atten12dB<T> = Attenuated<{ attenuation::DB_12 }, T>;
 
     pub trait AdcChannels {
         type Adc: Adc;
@@ -923,10 +1034,10 @@ pub mod continuous {
         fn iter(&self) -> Self::Iterator<'_>;
     }
 
-    impl<'d, P> AdcChannels for P
+    impl<P> AdcChannels for P
     where
         P: Peripheral,
-        P::P: ADCPin + 'd,
+        P::P: ADCPin,
     {
         type Adc = <<P as Peripheral>::P as ADCPin>::Adc;
 
@@ -940,9 +1051,9 @@ pub mod continuous {
         }
     }
 
-    impl<'d, const A: adc_atten_t, C> AdcChannels for Attenuated<A, C>
+    impl<const A: adc_atten_t, C> AdcChannels for Attenuated<A, C>
     where
-        C: AdcChannels + 'd,
+        C: AdcChannels,
     {
         type Adc = C::Adc;
 
@@ -1417,7 +1528,7 @@ pub mod continuous {
         }
     }
 
-    impl<'d> Drop for AdcDriver<'d> {
+    impl Drop for AdcDriver<'_> {
         fn drop(&mut self) {
             let _ = self.stop();
 
@@ -1426,7 +1537,10 @@ pub mod continuous {
                 esp!(unsafe {
                     adc_continuous_register_event_callbacks(
                         self.handle,
-                        core::ptr::null(),
+                        &adc_continuous_evt_cbs_t {
+                            on_conv_done: None,
+                            on_pool_ovf: None,
+                        },
                         core::ptr::null_mut(),
                     )
                 })
@@ -1440,20 +1554,20 @@ pub mod continuous {
         }
     }
 
-    unsafe impl<'d> Send for AdcDriver<'d> {}
+    unsafe impl Send for AdcDriver<'_> {}
 
-    impl<'d> embedded_io::ErrorType for AdcDriver<'d> {
+    impl embedded_io::ErrorType for AdcDriver<'_> {
         type Error = EspIOError;
     }
 
-    impl<'d> embedded_io::Read for AdcDriver<'d> {
+    impl embedded_io::Read for AdcDriver<'_> {
         fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
             self.read_bytes(buf, delay::BLOCK).map_err(EspIOError)
         }
     }
 
     #[cfg(not(esp_idf_adc_continuous_isr_iram_safe))]
-    impl<'d> embedded_io_async::Read for AdcDriver<'d> {
+    impl embedded_io_async::Read for AdcDriver<'_> {
         async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
             self.read_bytes_async(buf).await.map_err(EspIOError)
         }

@@ -611,19 +611,19 @@ impl<'d> SpiDriver<'d> {
     }
 }
 
-impl<'d> Drop for SpiDriver<'d> {
+impl Drop for SpiDriver<'_> {
     fn drop(&mut self) {
         esp!(unsafe { spi_bus_free(self.host()) }).unwrap();
     }
 }
 
-unsafe impl<'d> Send for SpiDriver<'d> {}
+unsafe impl Send for SpiDriver<'_> {}
 
 pub struct SpiBusDriver<'d, T>
 where
     T: BorrowMut<SpiDriver<'d>>,
 {
-    _lock: BusLock,
+    lock: Option<BusLock>,
     handle: spi_device_handle_t,
     driver: T,
     duplex: Duplex,
@@ -646,7 +646,7 @@ where
         let lock = BusLock::new(handle)?;
 
         Ok(Self {
-            _lock: lock,
+            lock: Some(lock),
             handle,
             driver,
             duplex: config.duplex,
@@ -825,6 +825,10 @@ where
     T: BorrowMut<SpiDriver<'d>>,
 {
     fn drop(&mut self) {
+        // Need to drop the lock first, because it holds the device
+        // we are about to remove below
+        self.lock = None;
+
         esp!(unsafe { spi_bus_remove_device(self.handle) }).unwrap();
     }
 }
@@ -1016,7 +1020,9 @@ where
 
     #[cfg(not(esp_idf_spi_master_isr_in_iram))]
     pub async fn read_async(&mut self, read: &mut [u8]) -> Result<(), EspError> {
-        core::pin::pin!(self.transaction_async(&mut [Operation::Read(read)])).await
+        let mut operation = [Operation::Read(read)];
+        let work = core::pin::pin!(self.transaction_async(&mut operation));
+        work.await
     }
 
     pub fn write(&mut self, write: &[u8]) -> Result<(), EspError> {
@@ -1025,7 +1031,9 @@ where
 
     #[cfg(not(esp_idf_spi_master_isr_in_iram))]
     pub async fn write_async(&mut self, write: &[u8]) -> Result<(), EspError> {
-        core::pin::pin!(self.transaction_async(&mut [Operation::Write(write)])).await
+        let mut operation = [Operation::Write(write)];
+        let work = core::pin::pin!(self.transaction_async(&mut operation));
+        work.await
     }
 
     pub fn transfer_in_place(&mut self, buf: &mut [u8]) -> Result<(), EspError> {
@@ -1034,7 +1042,9 @@ where
 
     #[cfg(not(esp_idf_spi_master_isr_in_iram))]
     pub async fn transfer_in_place_async(&mut self, buf: &mut [u8]) -> Result<(), EspError> {
-        core::pin::pin!(self.transaction_async(&mut [Operation::TransferInPlace(buf)])).await
+        let mut operation = [Operation::TransferInPlace(buf)];
+        let work = core::pin::pin!(self.transaction_async(&mut operation));
+        work.await
     }
 
     pub fn transfer(&mut self, read: &mut [u8], write: &[u8]) -> Result<(), EspError> {
@@ -1043,7 +1053,9 @@ where
 
     #[cfg(not(esp_idf_spi_master_isr_in_iram))]
     pub async fn transfer_async(&mut self, read: &mut [u8], write: &[u8]) -> Result<(), EspError> {
-        core::pin::pin!(self.transaction_async(&mut [Operation::Transfer(read, write)])).await
+        let mut operation = [Operation::Transfer(read, write)];
+        let work = core::pin::pin!(self.transaction_async(&mut operation));
+        work.await
     }
 
     fn run<'a, 'c, 'p, P, M>(
@@ -1521,7 +1533,9 @@ where
 
     #[cfg(not(esp_idf_spi_master_isr_in_iram))]
     pub async fn read_async(&mut self, read: &mut [u8]) -> Result<(), EspError> {
-        core::pin::pin!(self.transaction_async(&mut [Operation::Read(read)])).await
+        let mut operation = [Operation::Read(read)];
+        let work = core::pin::pin!(self.transaction_async(&mut operation));
+        work.await
     }
 
     pub fn write(&mut self, write: &[u8]) -> Result<(), EspError> {
@@ -1530,7 +1544,9 @@ where
 
     #[cfg(not(esp_idf_spi_master_isr_in_iram))]
     pub async fn write_async(&mut self, write: &[u8]) -> Result<(), EspError> {
-        core::pin::pin!(self.transaction_async(&mut [Operation::Write(write)])).await
+        let mut operation = [Operation::Write(write)];
+        let work = core::pin::pin!(self.transaction_async(&mut operation));
+        work.await
     }
 
     pub fn transfer_in_place(&mut self, buf: &mut [u8]) -> Result<(), EspError> {
@@ -1539,7 +1555,9 @@ where
 
     #[cfg(not(esp_idf_spi_master_isr_in_iram))]
     pub async fn transfer_in_place_async(&mut self, buf: &mut [u8]) -> Result<(), EspError> {
-        core::pin::pin!(self.transaction_async(&mut [Operation::TransferInPlace(buf)])).await
+        let mut operation = [Operation::TransferInPlace(buf)];
+        let work = core::pin::pin!(self.transaction_async(&mut operation));
+        work.await
     }
 
     pub fn transfer(&mut self, read: &mut [u8], write: &[u8]) -> Result<(), EspError> {
@@ -1548,7 +1566,9 @@ where
 
     #[cfg(not(esp_idf_spi_master_isr_in_iram))]
     pub async fn transfer_async(&mut self, read: &mut [u8], write: &[u8]) -> Result<(), EspError> {
-        core::pin::pin!(self.transaction_async(&mut [Operation::Transfer(read, write)])).await
+        let mut operation = [Operation::Transfer(read, write)];
+        let work = core::pin::pin!(self.transaction_async(&mut operation));
+        work.await
     }
 
     fn run<'a>(
@@ -1697,7 +1717,7 @@ where
     },
 }
 
-impl<'c, 'p, P, M> CsCtl<'c, 'p, P, M>
+impl<P, M> CsCtl<'_, '_, P, M>
 where
     P: OutputPin,
     M: OutputMode,
@@ -2055,7 +2075,7 @@ async fn spi_transmit_async(
 
             let last = queue.back_mut().unwrap();
             last.0.user = &last.1 as *const _ as *mut _;
-            match esp!(unsafe { spi_device_queue_trans(handle, &mut last.0, delay::NON_BLOCK) }) {
+            match esp!(unsafe { spi_device_queue_trans(handle, &mut last.0, delay::BLOCK) }) {
                 Err(e) if e.code() == ESP_ERR_TIMEOUT => unreachable!(),
                 other => other,
             }
@@ -2066,9 +2086,10 @@ async fn spi_transmit_async(
             match esp!(unsafe {
                 spi_device_get_trans_result(handle, &mut rtrans, delay::NON_BLOCK)
             }) {
-                Err(e) if e.code() == ESP_ERR_TIMEOUT => unreachable!(),
-                other => other,
-            }?;
+                Err(e) if e.code() == ESP_ERR_TIMEOUT => return Ok(false),
+                Err(e) => Err(e)?,
+                Ok(()) => (),
+            };
 
             if rtrans != &mut queue.front_mut().unwrap().0 {
                 unreachable!();
@@ -2077,14 +2098,17 @@ async fn spi_transmit_async(
             queue.pop_front().unwrap();
             queued.set(queue.len());
 
-            Ok(())
+            Ok(true)
         };
 
         for transaction in transactions {
-            if queue.len() == queue_size {
+            while queue.len() == queue_size {
+                if pop(queue)? {
+                    break;
+                }
+
                 // If the queue is full, we wait for the first transaction in the queue
                 queue.front_mut().unwrap().1.wait().await;
-                pop(queue)?;
             }
 
             // Write transaction to a stable memory location
@@ -2092,8 +2116,9 @@ async fn spi_transmit_async(
         }
 
         while !queue.is_empty() {
-            queue.front_mut().unwrap().1.wait().await;
-            pop(queue)?;
+            if !pop(queue)? {
+                queue.front_mut().unwrap().1.wait().await;
+            }
         }
 
         Ok(())

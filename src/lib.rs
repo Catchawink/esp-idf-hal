@@ -11,6 +11,10 @@
 #[cfg(not(esp_idf_comp_driver_enabled))]
 compile_error!("esp-idf-hal requires the `driver` ESP-IDF component to be enabled");
 
+// mutually exclusive features assert
+#[cfg(all(feature = "rmt-legacy", esp_idf_comp_espressif__onewire_bus_enabled))]
+compile_error!("the onewire component cannot be used with the legacy rmt peripheral");
+
 #[cfg(feature = "std")]
 #[allow(unused_imports)]
 #[macro_use]
@@ -52,11 +56,6 @@ pub mod peripheral;
 pub mod peripherals;
 pub mod prelude;
 pub mod reset;
-
-// mutually exclusive features assert
-#[cfg(all(feature = "rmt-legacy", esp_idf_comp_espressif__onewire_bus_enabled))]
-compile_error!("the onewire component cannot be used with the legacy rmt peripheral");
-
 pub mod rmt;
 pub mod rom;
 #[cfg(feature = "experimental")]
@@ -74,6 +73,8 @@ pub mod uart;
 ))]
 pub mod ulp;
 pub mod units;
+#[cfg(esp_idf_soc_usb_serial_jtag_supported)]
+pub mod usb_serial;
 
 // This is used to create `embedded_hal` compatible error structs
 // that preserve original `EspError`.

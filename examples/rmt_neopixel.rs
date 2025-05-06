@@ -9,6 +9,9 @@
 //! Datasheet (PDF) for a WS2812, which explains how the pulses are to be sent:
 //! https://cdn-shop.adafruit.com/datasheets/WS2812.pdf
 
+#![allow(unknown_lints)]
+#![allow(unexpected_cfgs)]
+
 #[cfg(any(feature = "rmt-legacy", esp_idf_version_major = "4"))]
 fn main() -> anyhow::Result<()> {
     example::main()
@@ -121,7 +124,7 @@ mod example {
         /// 7      0 7      0 7      0
         /// 00000010 00000001 00000100
         fn from(rgb: Rgb) -> Self {
-            ((rgb.r as u32) << 16) | ((rgb.g as u32) << 8) | rgb.b as u32
+            ((rgb.g as u32) << 16) | ((rgb.r as u32) << 8) | rgb.b as u32
         }
     }
 }
