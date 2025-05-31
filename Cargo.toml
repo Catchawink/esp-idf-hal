@@ -72,4 +72,4 @@ display-interface-spi = "0.4.1"
 embedded-graphics = "0.7.1"
 
 [patch.crates-io]
-embuild ={ git = "https://github.com/Catchawink/embuild.git"}
+embuild = { git = "https://github.com/Catchawink/embuild.git", branch = "temp" }
