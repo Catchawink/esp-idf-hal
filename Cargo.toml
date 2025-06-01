@@ -52,7 +52,7 @@ embedded-hal-nb = "1"
 embedded-hal-async = "1"
 embedded-io = "0.6"
 embedded-io-async = "0.6"
-esp-idf-sys = { git = "https://github.com/Catchawink/esp-idf-sys.git", default-features = false }
+esp-idf-sys = { git = "https://github.com/Catchawink/esp-idf-sys.git", branch = "master", default-features = false }
 critical-section = { version = "1.1.1", optional = true, features = ["restore-state-none"] }
 heapless = "0.8"
 num_enum = { version = "0.7", default-features = false }
@@ -66,7 +66,7 @@ embuild = { version = "0.33.0" }
 
 [dev-dependencies]
 anyhow = "1"
-esp-idf-sys = { git = "https://github.com/Catchawink/esp-idf-sys.git", features = ["binstart"] }
+esp-idf-sys = { git = "https://github.com/Catchawink/esp-idf-sys.git", branch = "master", features = ["binstart"] }
 mipidsi = "0.5.0"
 display-interface-spi = "0.4.1"
 embedded-graphics = "0.7.1"
