@@ -62,7 +62,7 @@ atomic-waker = { version = "1.1.1", default-features = false }
 embassy-sync = { version = "0.6" }
 
 [build-dependencies]
-embuild = { git = "https://github.com/Catchawink/embuild.git", branch = "master" }
+embuild = { git = "https://github.com/Catchawink/embuild.git", branch = "master", features = ["espidf"] }
 
 [dev-dependencies]
 anyhow = "1"
